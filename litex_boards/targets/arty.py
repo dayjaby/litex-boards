@@ -15,16 +15,21 @@ from migen import *
 from litex_boards.platforms import arty
 from litex.build.xilinx.vivado import vivado_build_args, vivado_build_argdict
 
+from litex.build.generic_platform import Subsignal, Pins, Misc, IOStandard
 from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
 from litex.soc.integration.soc_sdram import *
 from litex.soc.integration.builder import *
 from litex.soc.cores.led import LedChaser
+from litex.soc.cores.spi import SPIMaster
+from litex.soc.cores.gpio import GPIOTristate, GPIOIn
 
 from litedram.modules import MT41K128M16
 from litedram.phy import s7ddrphy
 
 from liteeth.phy.mii import LiteEthPHYMII
+
+from litescope import LiteScopeAnalyzer
 
 # CRG ----------------------------------------------------------------------------------------------
 
@@ -56,7 +61,17 @@ class _CRG(Module):
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, variant="a7-35", toolchain="vivado", sys_clk_freq=int(100e6), with_ethernet=False, with_etherbone=False, eth_ip="192.168.1.50", eth_dynamic_ip=False, ident_version=True, **kwargs):
+    def __init__(self, 
+            variant="a7-35",
+            toolchain="vivado",
+            sys_clk_freq=int(100e6),
+            with_ethernet=False,
+            with_etherbone=False,
+            eth_ip="192.168.1.50",
+            eth_dynamic_ip=False,
+            ident_version=True,
+            analyzer_csv="analyzer.csv",
+            **kwargs):
         platform = arty.Platform(variant=variant, toolchain=toolchain)
         kwargs["integrated_rom_size"] = 0x10000 if with_etherbone else 0x8000
 
@@ -97,11 +112,83 @@ class BaseSoC(SoCCore):
             if with_etherbone:
                 self.add_etherbone(phy=self.ethphy, ip_address=eth_ip)
 
+        _dws1000_ardu_io = [
+            ("dw1000_spi", 0,
+                Subsignal("clk",  Pins("ck_io:ck_io13")),
+                Subsignal("mosi", Pins("ck_io:ck_io11")),
+                Subsignal("cs_n", Pins("ck_io:ck_io10")),
+                Subsignal("miso", Pins("ck_io:ck_io12")),
+                Subsignal("pha", Pins("ck_io:ck_io0"), Misc("PULLDOWN True")),
+                Subsignal("pol", Pins("ck_io:ck_io1"), Misc("PULLDOWN True")),
+                Misc("SLEW=FAST"),
+                IOStandard("LVCMOS33"),
+            ),
+            ("dw1000_led", 0, Pins("ck_io:ck_io3"),  IOStandard("LVCMOS33")), # TX LED on the DWS1000 module
+            ("dw1000_led", 1, Pins("ck_io:ck_io4"),  IOStandard("LVCMOS33")), # RX LED on the DWS1000 module
+            ("dw1000_info", 0,
+                Subsignal("exton",   Pins("ck_io:ck_a0")),
+                Subsignal("wakeup",   Pins("ck_io:ck_io9")),
+                Subsignal("irq",   Pins("ck_io:ck_io8")),
+                IOStandard("LVCMOS33"),
+            ),
+            ("dw1000_rstn", 0,
+                Pins("ck_io:ck_io7"),
+                IOStandard("LVCMOS33"),
+            ),
+        ]
+        platform.add_extension(_dws1000_ardu_io)
         # Leds -------------------------------------------------------------------------------------
         self.submodules.leds = LedChaser(
-            pads         = platform.request_all("user_led"),
+            pads         = platform.request_all("dw1000_led"),
             sys_clk_freq = sys_clk_freq)
         self.add_csr("leds")
+
+        self.submodules.dw1000_rstn = GPIOTristate(platform.request("dw1000_rstn", 0))
+        self.add_csr("dw1000_rstn")
+
+        self.submodules.dw1000_info = GPIOIn(platform.request("dw1000_info"))
+        self.add_csr("dw1000_info")
+
+        # SPI with LiteScope
+        self.add_spi_master()
+        print(dir(self.cpu.ibus))
+        analyzer_signals = [
+            self.spi_master._control.storage,
+            self.spi_master._status.status,
+            self.spi_master._cs.storage,
+            self.spi_master.mosi,
+            self.spi_master.miso,
+            self.spi_master.pads.clk,
+            self.spi_master.pads.cs_n,
+            self.spi_master.pads.mosi,
+            self.spi_master.pads.miso,
+            self.dw1000_rstn._oe.storage,
+            self.dw1000_rstn._in.status,
+            self.dw1000_rstn._out.storage,
+            self.dw1000_info._in.status,
+            self.cpu.ibus.adr,
+            self.cpu.ibus.stb,
+            self.cpu.ibus.dat_w,
+            self.cpu.ibus.dat_r
+
+        ]
+        self.submodules.analyzer = LiteScopeAnalyzer(analyzer_signals,
+            depth=1024,
+            clock_domain="sys",
+            csr_csv=analyzer_csv
+        )
+        self.add_csr("analyzer")
+
+    def add_spi_master(self):
+        self.submodules.spi_master = SPIMaster(
+            pads=self.platform.request("dw1000_spi"),
+            data_width=8,
+            sys_clk_freq=self.sys_clk_freq,
+            spi_clk_freq=2e6,
+            manual_cs=True)
+        self.spi_master.add_csr(with_loopback=True)
+        self.spi_master.add_clk_divider()
+        self.add_csr("spi_master")
 
 # Build --------------------------------------------------------------------------------------------
 
@@ -110,6 +197,7 @@ def main():
     parser.add_argument("--toolchain",           default="vivado",                 help="Toolchain use to build (default: vivado)")
     parser.add_argument("--build",               action="store_true",              help="Build bitstream")
     parser.add_argument("--load",                action="store_true",              help="Load bitstream")
+    parser.add_argument("--flash",               action="store_true",              help="Flash bitstream")
     parser.add_argument("--variant",             default="a7-35",                  help="Board variant: a7-35 (default) or a7-100")
     parser.add_argument("--sys-clk-freq",        default=100e6,                    help="System clock frequency (default: 100MHz)")
     ethopts = parser.add_mutually_exclusive_group()
@@ -121,6 +209,7 @@ def main():
     sdopts.add_argument("--with-spi-sdcard",     action="store_true",              help="Enable SPI-mode SDCard support")
     sdopts.add_argument("--with-sdcard",         action="store_true",              help="Enable SDCard support")
     parser.add_argument("--no-ident-version",    action="store_false",             help="Disable build time output")
+    parser.add_argument("--analyzer-csv",        default="analyzer.csv", type=str, help="Analyzer csv file")
     builder_args(parser)
     soc_sdram_args(parser)
     vivado_build_args(parser)
@@ -137,9 +226,11 @@ def main():
         eth_ip         = args.eth_ip,
         eth_dynamic_ip = args.eth_dynamic_ip,
         ident_version  = args.no_ident_version,
+        analyzer_csv   = args.analyzer_csv,
         **soc_sdram_argdict(args)
     )
-    soc.platform.add_extension(arty._sdcard_pmod_io)
+    if args.with_spi_sdcard or args.with_sdcard:
+        soc.platform.add_extension(arty._sdcard_pmod_io)
     if args.with_spi_sdcard:
         soc.add_spi_sdcard()
     if args.with_sdcard:
@@ -151,6 +242,10 @@ def main():
     if args.load:
         prog = soc.platform.create_programmer()
         prog.load_bitstream(os.path.join(builder.gateware_dir, soc.build_name + ".bit"))
+
+    if args.flash:
+        prog = soc.platform.create_programmer()
+        prog.flash(0, os.path.join(builder.gateware_dir, soc.build_name + ".bit"))
 
 if __name__ == "__main__":
     main()

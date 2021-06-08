@@ -306,6 +306,7 @@ def sdcard_pmod_io(pmod):
 ]
 _sdcard_pmod_io = sdcard_pmod_io("pmodd") # SDCARD PMOD on JD.
 
+
 # Platform -----------------------------------------------------------------------------------------
 
 class Platform(XilinxPlatform):
