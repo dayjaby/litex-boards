@@ -76,6 +76,7 @@ class BaseSoC(SoCCore):
         kwargs["integrated_rom_size"] = 0x10000 if with_etherbone else 0x8000
 
         # SoCCore ----------------------------------------------------------------------------------
+        print(kwargs)
         SoCCore.__init__(self, platform, sys_clk_freq,
             ident          = "LiteX SoC on Arty A7",
             ident_version  = ident_version,
@@ -137,6 +138,7 @@ class BaseSoC(SoCCore):
             ),
         ]
         platform.add_extension(_dws1000_ardu_io)
+        platform.add_extension(arty._usb_uart_pmod_io) # on pmodb
         # Leds -------------------------------------------------------------------------------------
         self.submodules.leds = LedChaser(
             pads         = platform.request_all("dw1000_led"),
@@ -151,7 +153,6 @@ class BaseSoC(SoCCore):
 
         # SPI with LiteScope
         self.add_spi_master()
-        print(dir(self.cpu.ibus))
         analyzer_signals = [
             self.spi_master._control.storage,
             self.spi_master._status.status,
@@ -208,6 +209,7 @@ def main():
     sdopts = parser.add_mutually_exclusive_group()
     sdopts.add_argument("--with-spi-sdcard",     action="store_true",              help="Enable SPI-mode SDCard support")
     sdopts.add_argument("--with-sdcard",         action="store_true",              help="Enable SDCard support")
+    sdopts.add_argument("--with-timer",          action="store_true",              help="Enable CPU timer support")
     parser.add_argument("--no-ident-version",    action="store_false",             help="Disable build time output")
     parser.add_argument("--analyzer-csv",        default="analyzer.csv", type=str, help="Analyzer csv file")
     builder_args(parser)
@@ -217,6 +219,7 @@ def main():
 
     assert not (args.with_etherbone and args.eth_dynamic_ip)
 
+    print(soc_sdram_argdict(args))
     soc = BaseSoC(
         variant        = args.variant,
         toolchain      = args.toolchain,
@@ -230,7 +233,7 @@ def main():
         **soc_sdram_argdict(args)
     )
     if args.with_spi_sdcard or args.with_sdcard:
-        soc.platform.add_extension(arty._sdcard_pmod_io)
+        soc.platform.add_extension(arty._sdcard_pmod_io) # on pmodd
     if args.with_spi_sdcard:
         soc.add_spi_sdcard()
     if args.with_sdcard:
